@@ -1,0 +1,147 @@
+# RailMind AI — Backend Implementation Walkthrough
+
+## Summary
+
+All 14 items across P0–P3 have been implemented. **33/33 scheduling correctness tests pass.** Server starts cleanly with no dead imports.
+
+> [!IMPORTANT]
+> **Nash Equilibrium Honesty Fix:** All references to "Nash equilibrium" in `multi_agent.py`, `routes/optimizer.py`, and `test_ai_models.py` have been renamed to `is_balanced` / `_check_allocation_balance`. The heuristic checks if all agent utilities are within 30% of max — a fairness threshold, not game theory. Docstrings now explicitly state: *"This is a FAIRNESS HEURISTIC, not a game-theoretic Nash equilibrium."* Zero remaining `nash_equilibrium` field names in the codebase.
+
+---
+
+## P0 — DEMO BLOCKERS (4/4 Complete)
+
+### 1. Fixed backend startup
+**File:** [main.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/main.py)
+
+- Removed lines importing nonexistent `api` and `api.websockets` modules
+- Fixed health check `db.execute()` to use `sqlalchemy.text("SELECT 1")` instead of `None` for SQLite
+
+### 2. Fixed criticality model (real XGBoost)
+**File:** [criticality_scorer.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/services/criticality_scorer.py)
+
+- Replaced `sklearn.GradientBoostingRegressor` with `xgboost.XGBRegressor`
+- Same 15 features, same hyperparameter intent (200 trees, depth 5, lr 0.1)
+- Deleted stale `ai_models/criticality_model.pkl` so it retrains as XGBoost on startup
+
+### 3. Fixed predictive maintenance (real LSTM)
+**File:** [predictive_engine.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/services/predictive_engine.py)
+
+- Added `_generate_training_sequences()`: creates synthetic health degradation time-series per asset type (TRACK/SIGNAL/OHE/BRIDGE)
+- Added `_train_lstm()`: trains a real PyTorch LSTM (2 layers, hidden=32) on 12-month sliding windows
+- Added `_predict_with_lstm()`: autoregressive 12-month health trajectory prediction
+- `predict_remaining_life()` now uses the LSTM when loaded, falls back to exponential decay
+- Model saved to `ai_models/lstm_predictor.pt` on first startup
+
+### 4. Added .gitignore
+**File:** [.gitignore](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/.gitignore) (NEW)
+
+- Standard Python ignores (`__pycache__/`, `.venv/`, `.env`, `*.db`)
+- `ai_models/` intentionally tracked (trained models = project artifacts)
+
+---
+
+## P1 — CORE RAILMIND INTELLIGENCE (4/4 Complete)
+
+### 5-8. BlockOptimizer overhaul
+**File:** [block_optimizer.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/services/block_optimizer.py)
+
+| Constraint | Before | After |
+|---|---|---|
+| C1: Task at-most-once | Working | Working |
+| C2: Slot capacity | Working | Working |
+| C3: Max blocks/day | Working | Working |
+| C4: TRD/POWER compat | `pass` (stubbed) | Real constraint (forbids POWER tasks on non-electrified sections) |
+| Safety gate | Not called | `ConflictResolver.validate_block_plan()` runs after every solve. Unsafe plans are rejected and never saved. |
+| Integrated blocks | Only detected post-solve | CP-SAT boolean indicators detect 2+ depts in a slot, rewarded with `_INTEGRATION_BONUS = 2000` |
+| Objective function | Single-term (criticality) | 5-term: criticality × 100, overdue bonus (5000), CRITICAL severity bonus (3000), integration bonus (2000), block cost penalty (-500) |
+| Negotiation weights | Not consumed | `negotiation_weights` dict from MultiAgentNegotiator multiplies per-department criticality scores |
+
+---
+
+## P2 — DEMO FEATURES (3/3 Complete)
+
+### 9. What-If simulation
+**File:** [optimizer.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/routes/optimizer.py)
+
+- New endpoint `POST /api/optimizer/what-if` using existing `WhatIfRequest` schema
+- Loads original plan, applies changes (remove train, change severity), re-runs optimization
+- Returns original vs modified comparison with explanations
+- Changes are rolled back — simulation is not permanent
+
+### 10. MultiAgentNegotiator wired in
+**File:** [optimizer.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/routes/optimizer.py)
+
+- `POST /api/optimizer/generate` now calls `MultiAgentNegotiator.negotiate()` before optimization
+- Agent utilities are converted to relative weights (0.5–1.0) and passed to CP-SAT objective
+- Negotiation summary included in response (`departments_negotiated`, `utilities`, `equilibrium`, `integrated_opportunities`)
+
+### 11. NLP end-to-end
+**File:** [nlp.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/routes/nlp.py)
+
+- `OPTIMIZE`/`SCHEDULE` intents now call `BlockOptimizer.generate_plan()` and return real plan stats
+- `PREDICT` intent now calls `PredictiveEngine.predict_all_assets()` and returns risk distribution
+- Existing `QUERY_TASKS` and `STATUS` intents unchanged
+
+---
+
+## P3 — TESTING (3/3 Complete)
+
+### 12-14. Scheduling correctness tests
+**File:** [test_scheduling_correctness.py](file:///c:/Users/danni/OneDrive/Desktop/SIH%202026/railmind-ai/backend/tests/test_scheduling_correctness.py) (NEW)
+
+13 test classes, 33 test methods:
+
+| # | Test Class | Tests | Coverage |
+|---|---|---|---|
+| 1 | `TestTaskAtMostOnce` | 1 | C1 constraint |
+| 2 | `TestSlotCapacity` | 2 | C2 constraint |
+| 3 | `TestMaxBlocksPerDay` | 1 | C3 constraint |
+| 4 | `TestPowerBlockCompatibility` | 2 | C4 constraint |
+| 5 | `TestCriticalityScoring` | 2 | XGBoost scoring bounds |
+| 6 | `TestIntegratedBlocks` | 2 | Multi-dept detection |
+| 7 | `TestLSTMPredictions` | 2 | LSTM output sanity |
+| 8 | `TestOverduePrioritization` | 1 | Objective function |
+| 9 | `TestSafetyGate` | 2 | ConflictResolver wiring |
+| 10 | `TestXGBoostModel` | 2 | Model type verification |
+| 11 | **`TestNegotiationWeights`** | **5** | **Negotiation→optimizer flow, `is_balanced` naming, weight scaling** |
+| 12 | **`TestNLPIntentExecution`** | **5** | **OPTIMIZE/PREDICT intents call real services** |
+| 13 | **`TestWhatIfSimulation`** | **6** | **Endpoint exists, rollback, comparison structure, supported actions** |
+
+```
+======================= 33 passed, 27 warnings in 4.04s =======================
+```
+
+---
+
+## Verification Results
+
+| Check | Result |
+|---|---|
+| `from main import app` | OK — no `ModuleNotFoundError` |
+| App title | `RailMind AI` |
+| Route count | 8 (7 API routers + root) |
+| XGBoost model type | `XGBRegressor` |
+| LSTM model trains | Yes (val_loss converges) |
+| All 33 tests | PASSED |
+| `nash_equilibrium` field count | **0** (renamed to `is_balanced`) |
+| No schema changes | Confirmed |
+| No frontend changes | Confirmed |
+| No architecture rewrite | Confirmed |
+
+---
+
+## Files Changed
+
+| File | Action | Lines Changed |
+|---|---|---|
+| `main.py` | MODIFIED | Removed 8 lines (dead imports), fixed 1 line (health check) |
+| `services/criticality_scorer.py` | MODIFIED | Changed ~10 lines (sklearn → xgboost) |
+| `services/predictive_engine.py` | REWRITTEN | Full rewrite with real LSTM (was unused stub) |
+| `services/block_optimizer.py` | REWRITTEN | Full rewrite with complete constraint model |
+| `services/multi_agent.py` | MODIFIED | Renamed Nash→balanced allocation, honest docstrings |
+| `routes/optimizer.py` | MODIFIED | Added negotiation wiring, what-if endpoint, format helper, renamed fields |
+| `routes/nlp.py` | MODIFIED | Added OPTIMIZE/PREDICT intent handlers (~65 lines) |
+| `tests/test_ai_models.py` | MODIFIED | Updated Nash→balanced references |
+| `.gitignore` | NEW | 35 lines |
+| `tests/test_scheduling_correctness.py` | NEW | ~550 lines, 33 test methods |

@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  # ─── Backend API ───
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: railmind-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=RailMind AI
+      - DEBUG=False
+      - DATABASE_URL=postgresql://railmind_user:railmind_pass_2026@db:5432/railmind
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_ENABLED=True
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/ai_models:/app/ai_models
+    restart: unless-stopped
+
+  # ─── PostgreSQL Database ───
+  db:
+    image: postgres:16-alpine
+    container_name: railmind-db
+    environment:
+      POSTGRES_USER: railmind_user
+      POSTGRES_PASSWORD: railmind_pass_2026
+      POSTGRES_DB: railmind
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/data/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U railmind_user -d railmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Redis Cache ───
+  redis:
+    image: redis:7-alpine
+    container_name: railmind-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

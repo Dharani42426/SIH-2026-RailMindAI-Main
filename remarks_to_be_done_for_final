@@ -1,0 +1,183 @@
+# 🏛️ SIH Expert Judge Evaluation — RailMind AI
+## Problem Statement: SIH26027 — AI-Powered Automatic Block Planning for Indian Railways
+
+---
+
+## Evaluation Criteria & Scoring
+
+### 1. Data Integration (TMS, SMMS, TDMS + COA Train Timetable)
+**PS Requirement:** Integrate maintenance data from TMS, SMMS, TDMS with corridor block availability per Train Timetable and goods train forecast from the Control Office.
+
+**What you built:**
+- `DataIntegrator` service that aggregates `MaintenanceTask` records tagged by `source_system` (TMS/SMMS/TDMS) and cross-references them against `TrainSchedule` records (the COA timetable equivalent)
+- `get_available_windows()` computes real train-free maintenance gaps by parsing every train's `entry_time`/`exit_time` on a given day, applying delay buffers, and finding corridor gaps ≥ 60 min
+- Tasks are grouped by department (`ENGG`/`SNT`/`TRD`) matching the real-world three-department structure
+- Asset health data from `RailwayAsset` is linked into the pipeline
+
+**Strengths:**
+- Architecturally correct — the data flow mirrors the real BDMS/COA pipeline
+- Train conflict detection considers `runs_on_day` (weekday filtering), `avg_delay`, and priority levels
+- Feature enrichment for ML includes 15 domain-specific variables (safety impact, cascading risk, ghat section risk, etc.)
+
+**Weaknesses:**
+- No actual TMS/SMMS/TDMS API connectors — all data is seeded/manual. A real judge would ask: "How would this connect to the live CRIS systems?"
+- Goods train forecast is not explicitly modeled (the PS specifically mentions it)
+- `last_maintenance_gap` defaults to 180 days instead of being computed from real history
+
+> **Score: 7.5 / 10**
+
+---
+
+### 2. AI/ML for Prioritization (Criticality, Urgency, Asset Impact)
+**PS Requirement:** Use AI/ML algorithms to prioritize and schedule maintenance tasks based on criticality, urgency, and impact on asset availability.
+
+**What you built:**
+- **XGBoost CriticalityScorer** — 15-feature regression model trained on 2,000 synthetic samples. Features include `severity_encoded`, `days_overdue`, `traffic_density`, `safety_impact_score`, `cascading_risk`, `speed_restriction_impact`, `asset_remaining_life`, `asset_health`, `weather_risk_factor`
+- **Isolation Forest AnomalyDetector** — unsupervised anomaly detection for unusual maintenance patterns (frequent defects, rapid health drops)
+- **LSTM PredictiveEngine** — PyTorch LSTM (2 layers, hidden=32, seq_len=12) for asset health degradation prediction and Remaining Useful Life (RUL) estimation
+- Domain-expert label generation formula encodes Indian Railways engineering knowledge
+
+**Strengths:**
+- You actually implemented and trained real models (XGBoost, Isolation Forest, LSTM) — not just mock/hardcoded logic
+- Feature engineering is domain-aware (ghat section monsoon risk, cascading failure types, speed restriction impact)
+- Feature importance is logged and explainable
+- Graceful fallbacks: if XGBoost fails → rule-based; if PyTorch unavailable → exponential decay model
+
+**Weaknesses:**
+- All models are trained on **synthetic data** — a sharp judge will probe this. The XGBoost is essentially learning to replicate the rule-based formula that generated its labels. This is circular: the model can never outperform its own training signal
+- No train/test split validation or accuracy metrics reported
+- The LSTM trains on synthetic degradation curves, not real sensor/inspection data
+- No model retraining pipeline or concept drift handling
+
+> **Score: 7.0 / 10**
+
+---
+
+### 3. Optimization for Multi-Department Coordination (Maximizing Uptime)
+**PS Requirement:** Optimize block scheduling to maximize asset uptime by minimizing downtime and efficiently coordinating multi-department activities.
+
+**What you built:**
+- **CP-SAT Optimizer** (Google OR-Tools) — the core of the system. Formally modeled as a constrained optimization problem with:
+  - **5 hard constraints:** (C1) each task ≤ 1 slot, (C2) duration ≤ capacity, (C3) max blocks/day, (C4) power block compatibility, (C5) no train conflicts
+  - **5-term objective function:** criticality reward + overdue bonus + severity bonus + integration bonus − block cost penalty
+  - Integration detection via boolean indicator variables per slot per department pair
+- **Multi-Agent Negotiator** — 3 `DepartmentAgent` instances (ENGG, SNT, TRD) with utility functions, a 4-round negotiation protocol, and a fairness balance check
+- **ConflictResolver** — CSP-based post-solve safety gate checking 5 conflict types (TRAIN_CLASH, DEPT_OVERLAP, RESOURCE, ADJACENT, PRIORITY)
+- Greedy fallback when OR-Tools is unavailable
+
+**Strengths:**
+- This is genuinely impressive for a hackathon. The CP-SAT formulation is mathematically sound — decision variables, constraints, and objective terms are correctly encoded
+- The integration bonus term (`Term 4`) directly addresses the PS requirement for "coordinating multi-department activities"
+- The safety gate is a separate, independent validation layer — good engineering practice
+- The multi-agent system has a clear 4-round protocol and explicit fairness heuristic
+
+**Weaknesses:**
+- The Multi-Agent Negotiator's output (`negotiation_weights`) feeds into the optimizer, but the optimizer doesn't actually use the specific slot preferences from Round 1 — it only applies a scalar weight multiplier. The negotiation is somewhat decorative
+- The fairness balance check (utility within 30% of max) is honestly labeled as a heuristic, but judges might expect Nash equilibrium verification or at least Pareto optimality analysis
+- No benchmark comparison (e.g., "our optimizer schedules 30% more tasks than the current manual process")
+- `max_blocks_per_day` is a config constant, not dynamically computed from actual corridor capacity
+
+> **Score: 8.5 / 10**
+
+---
+
+### 4. Multi-Horizon Planning (Weekly & Monthly)
+**PS Requirement:** Provide block plans over multiple time horizons — weekly and monthly.
+
+**What you built:**
+- `BlockPlan` model has `plan_type` field supporting `WEEKLY` and `MONTHLY`
+- `generate_plan()` auto-calculates end dates: 7 days for WEEKLY, 30 for MONTHLY
+- Plans are persisted with full metadata: `plan_start_date`, `plan_end_date`, `total_blocks`, `total_block_hrs`, `utilization_pct`, `optimization_score`
+
+**Strengths:**
+- Both horizons are supported end-to-end from backend to frontend
+- Block windows are correctly generated across the full date range
+
+**Weaknesses:**
+- Weekly and monthly plans use the same algorithm — there's no hierarchical planning (e.g., monthly strategic plan broken into weekly tactical plans)
+- No rolling-horizon approach where weekly plans respect and refine the monthly plan
+
+> **Score: 7.0 / 10**
+
+---
+
+### 5. User Interface & Operational Readiness
+**PS Requirement:** Transform current decentralized and manual block planning into a data-driven, coordinated process.
+
+**What you built:**
+- 11 full React pages: Dashboard, Request Inbox, AI Planner, Block Plans, Train Dispatch, Safety & Conflicts, Maintenance Board, Asset Health, What-If Simulator, Analytics, Login
+- **AI Planner Console** with NLP interface (Hindi/English) powered by Qwen-2.5 via Ollama
+- **What-If Simulator** with 5 perturbation types: remove train, delay train, add special train, change task severity, add emergency task
+- Role-based access control (Controller vs Department users)
+- Full CRUD lifecycle: Request → Review → Accept → AI Plan → Approve → Publish → Block Register
+- Safety report transparency on every block plan (checks passed/failed, rejection reasons)
+
+**Strengths:**
+- The UI is production-quality. Dark theme, proper icons, responsive layout
+- End-to-end workflow from departmental request to approved block plan is fully functional
+- The What-If simulator is a genuine differentiator — most SIH teams won't have this
+- NLP interface with Hindi support shows awareness of real user needs
+
+**Weaknesses:**
+- No mobile responsiveness (railway controllers often use tablets)
+- No real-time notifications via WebSocket (polling-based)
+- Dashboard analytics are somewhat basic (no trend analysis or comparative views)
+
+> **Score: 8.5 / 10**
+
+---
+
+### 6. Code Quality, Testing & Engineering
+**What you built:**
+- 10 test files covering: AI models, API endpoints, approval safety, conflict resolution, criticality scoring, NLP failover, NLP Ollama integration, optimizer, requests, scheduling correctness
+- Dockerfile for containerization
+- Clean separation: `models/` → `services/` → `routes/` → `schemas.py`
+- Comprehensive docstrings and inline comments throughout
+
+**Strengths:**
+- Test coverage is broader than 95% of SIH teams
+- Service layer is well-designed with clear single-responsibility
+- Graceful degradation throughout (OR-Tools → greedy, Ollama → regex, PyTorch → exponential decay)
+
+**Weaknesses:**
+- Some runtime bugs encountered during the session (UNIQUE constraint violations, Pydantic enum validation errors) — these suggest insufficient integration testing
+- No CI/CD pipeline
+- SQLite in production (fine for demo, but judges may ask about scalability)
+
+> **Score: 7.5 / 10**
+
+---
+
+## Final Scoring Summary
+
+| Criterion | Weight | Score | Weighted |
+|---|---|---|---|
+| 1. Data Integration (TMS/SMMS/TDMS/COA) | 20% | 7.5 | 1.50 |
+| 2. AI/ML Prioritization | 20% | 7.0 | 1.40 |
+| 3. Optimization & Multi-Dept Coordination | 25% | 8.5 | 2.13 |
+| 4. Multi-Horizon Planning | 10% | 7.0 | 0.70 |
+| 5. UI & Operational Readiness | 15% | 8.5 | 1.28 |
+| 6. Code Quality & Testing | 10% | 7.5 | 0.75 |
+| **TOTAL** | **100%** | | **7.75 / 10** |
+
+---
+
+## Verdict: 7.75 / 10 — Strong Contender (Top 5 Finalist Tier)
+
+### What will impress judges:
+1. **The CP-SAT optimizer is real** — you can show the mathematical formulation, the constraints, the objective function. This separates you from 90% of teams who will just sort tasks by priority
+2. **End-to-end working prototype** — from request submission to approved block plan with safety validation
+3. **What-If Simulator** — instant differentiator. Judges love "what if" capabilities
+4. **Multiple real AI/ML models** — XGBoost, Isolation Forest, LSTM, CP-SAT, LLM NLP. That's 5 distinct AI techniques in one system
+
+### What judges will challenge:
+1. **"Your models are trained on synthetic data. How do you validate them?"** — You need a prepared answer: "In production, we would use a feedback loop where actual maintenance outcomes (defects found, time taken) retrain the XGBoost model. For the demo, synthetic data generated from RDSO engineering manuals validates the domain knowledge encoding."
+2. **"How does this connect to real TMS/SMMS/TDMS?"** — Answer: "Our DataIntegrator is designed with a plugin architecture. Each source system has a standardized interface. For the demo, we seed data matching the schema of real CRIS systems. Integration would require CRIS API access."
+3. **"What about goods train forecasting?"** — This is explicitly in the PS and you don't model it. You should add even a basic mention of goods train handling.
+4. **"The multi-agent negotiation seems decorative."** — Be ready to explain that it provides weight adjustments that influence the optimizer's objective function, and show the negotiation log.
+
+### To push to 9/10:
+- Add a simple goods train forecast model (even random forecasts with higher uncertainty)
+- Add a benchmark comparison: "Manual planning = X hours downtime, RailMind = Y hours (Z% improvement)"
+- Add model validation metrics (even on synthetic holdout data)
+- Add one real-time notification (WebSocket for plan approval)
